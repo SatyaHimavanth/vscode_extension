@@ -3,24 +3,45 @@
   "displayName": "NextGenAI Coding Assistant",
   "description": "NextGen AI assistant — chat + inline suggestions with per-feature models and multi-provider config",
   "version": "0.0.1",
-  "engines": { "vscode": "^1.105.0" },
-  "activationEvents": ["onStartupFinished"],
+  "engines": {
+    "vscode": "^1.105.0"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "viewsContainers": {
       "activitybar": [
-        { "id": "nextgenai", "title": "NextGenAI", "icon": "media/icon.svg" }
+        {
+          "id": "nextgenai",
+          "title": "NextGenAI",
+          "icon": "media/icon.svg"
+        }
       ]
     },
     "views": {
       "nextgenai": [
-        { "type": "webview", "id": "nextgenai.chatView", "name": "Chat" }
+        {
+          "type": "webview",
+          "id": "nextgenai.chatView",
+          "name": "Chat"
+        }
       ]
     },
     "commands": [
-      { "command": "nextgenai.openSettings", "title": "NextGenAI: Settings" },
-      { "command": "nextgenai.pinFile", "title": "NextGenAI: Pin File to Chat" },
-      { "command": "nextgenai.toggleInline", "title": "NextGenAI: Toggle Inline Suggestions" }
+      {
+        "command": "nextgenai.openSettings",
+        "title": "NextGenAI: Settings"
+      },
+      {
+        "command": "nextgenai.pinFile",
+        "title": "NextGenAI: Pin File to Chat"
+      },
+      {
+        "command": "nextgenai.toggleInline",
+        "title": "NextGenAI: Toggle Inline Suggestions"
+      }
     ],
     "configuration": {
       "title": "NextGenAI",
@@ -46,7 +67,8 @@
     "test": "node ./out/test/runTest.js"
   },
   "dependencies": {
-    "axios": "^1.4.0"
+    "axios": "^1.4.0",
+    "sqlite3": "^5.1.7"
   },
   "devDependencies": {
     "@types/node": "^18.19.130",

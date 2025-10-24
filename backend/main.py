@@ -12,12 +12,10 @@ from pydantic import BaseModel
 from functools import wraps
 
 # LangChain Google GenAI integration (for streaming)
-# Note: package name is langchain-google-genai; import may vary by version
 from langchain_google_genai import ChatGoogleGenerativeAI
 # Google GenAI SDK (for listing models)
 from google import genai
 
-# load .env automatically if present for ease
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -37,6 +35,11 @@ MODEL_CACHE_TTL = 300  # seconds
 
 
 # ---------- Pydantic models ----------
+class MessageHistory(BaseModel):
+    role: str
+    content: str
+
+
 class FetchModelsPayload(BaseModel):
     provider: str
     api_key: Optional[str] = None
@@ -50,6 +53,7 @@ class ChatPayload(BaseModel):
     temperature: Optional[float] = 0.0
     max_tokens: Optional[int] = None
     api_key: Optional[str] = None
+    history: Optional[List[MessageHistory]] = []
 
 
 class CompletePayload(BaseModel):
@@ -186,8 +190,10 @@ async def chat_stream(
     authorization: Optional[str] = Header(None),
 ):
     """
-    Streaming chat endpoint.
-    Accepts model, temperature, max_tokens. Uses Google GenAI via LangChain.
+    Streaming chat endpoint with conversation history support.
+    Accepts model, temperature, max_tokens, and full chat history.
+    History format: [{"role": "user"|"assistant", "content": "..."}, ...]
+    Uses Google GenAI via LangChain.
     Prefer Authorization header for api key; else payload.api_key; else env var.
     Returns StreamingResponse (text/plain, chunked).
     """
@@ -199,15 +205,40 @@ async def chat_stream(
     model = payload.model or "gemini-2.5-flash"
     temperature = float(payload.temperature or 0.0)
     max_tokens = payload.max_tokens
+    history = payload.history or []
 
-    messages = [message]
+    # Build messages list with history + current message
+    messages = []
+    
+    # Add history to context
+    if history:
+        for msg in history:
+            messages.append({
+                "role": msg.get("role") if isinstance(msg, dict) else msg.role,
+                "content": msg.get("content") if isinstance(msg, dict) else msg.content
+            })
+    
+    # Add current message
+    messages.append({
+        "role": "user",
+        "content": message
+    })
 
     llm = ChatGoogleGenerativeAI(model=model, temperature=temperature, api_key=api_key)
 
     async def generator():
-        async for chunk in llm.astream(input=messages):
-            # print(chunk.content)
-            yield chunk.content
+        try:
+            async for chunk in llm.astream(input=messages):
+                yield chunk.content
+        except Exception as e:
+            print(f"Error in chat_stream: {e}",type(e))
+            try:
+                error_message = json.loads(str(e))['message']
+                print("Error message:", error_message)
+                yield error_message
+            except (json.JSONDecodeError, KeyError):
+                print("Error in chat_stream: ", e)
+                yield e
 
     return StreamingResponse(generator(), media_type="text/plain; charset=utf-8")
 

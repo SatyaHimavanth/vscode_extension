@@ -2,16 +2,20 @@
 import * as vscode from 'vscode';
 import { ConfigManager } from './configManager';
 import { BackendClient } from './client';
+import { ChatStorage, ChatMessage, Conversation } from './chatStorage';
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'nextgenai.chatView';
   private _view?: vscode.WebviewView;
   private cfgManager: ConfigManager;
   private backendUrl: string;
+  private chatStorage: ChatStorage;
+  private currentConversationId: string | null = null;
 
-  constructor(private readonly extensionUri: vscode.Uri, cfgManager: ConfigManager, backendUrl: string) {
+  constructor(private readonly extensionUri: vscode.Uri, cfgManager: ConfigManager, backendUrl: string, chatStorage: ChatStorage) {
     this.cfgManager = cfgManager;
     this.backendUrl = backendUrl;
+    this.chatStorage = chatStorage;
   }
 
   resolveWebviewView(webviewView: vscode.WebviewView) {
@@ -20,6 +24,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     webviewView.webview.html = this.getHtmlForWebview(webviewView.webview);
 
     webviewView.webview.onDidReceiveMessage(async (msg) => {
+      console.log('ChatView received message:', msg.type);
       switch (msg.type) {
         case 'sendMessage':
           await this.onSendMessage(msg.message);
@@ -30,39 +35,149 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case 'openSettings':
           vscode.commands.executeCommand('nextgenai.openSettings');
           break;
+        case 'newConversation':
+          await this.onNewConversation();
+          break;
+        case 'loadConversation':
+          await this.onLoadConversation(msg.conversationId);
+          break;
+        case 'deleteConversation':
+          await this.onDeleteConversation(msg.conversationId);
+          break;
+        case 'confirmDelete':
+          try {
+            const confirmed = await vscode.window.showWarningMessage(
+              `Delete conversation "${msg.title}"?`,
+              { modal: true },
+              'Delete'
+            );
+            if (confirmed === 'Delete') {
+              console.log('User confirmed delete for:', msg.conversationId);
+              await this.onDeleteConversation(msg.conversationId);
+            }
+          } catch (error) {
+            console.error('Error in delete confirmation:', error);
+          }
+          break;
+        case 'viewReady':
+          await this.initializeChat();
+          break;
       }
     });
   }
 
-  private async onSendMessage(message: string) {
-    if (!this._view) return;
-
-    const cfg = await this.cfgManager.loadConfig();
-    const feature = cfg.features.chat;
-    const provider = feature.provider;
-    const model = feature.model;
-
-    // get api key if needed
-    const apiKey = await this.cfgManager.getApiKey(provider);
-
-    const payload: any = {
-      message,
-      model,
-      api_key: apiKey
-    };
-
-    const client = new BackendClient(vscode.workspace.getConfiguration('nextgenai').get('baseUrl') as string || this.backendUrl);
-
-    // Start streaming - don't post user message yet, let the webview do it
-    this._view.webview.postMessage({ type: 'assistantStart' });
-    
+  private async initializeChat() {
     try {
-      await client.streamChat(payload, (chunk: string) => {
-        // send chunk to webview to append to last assistant bubble
-        this._view?.webview.postMessage({ type: 'stream', chunk });
-      }, () => {
-        this._view?.webview.postMessage({ type: 'done' });
-      });
+      const conversations = await this.chatStorage.getAllConversations();
+      console.log('Loaded conversations:', conversations);
+
+      if (conversations.length === 0) {
+        console.log('No conversations found, creating new one');
+        const newConv = await this.chatStorage.createConversation('New Conversation');
+        this.currentConversationId = newConv.id;
+        console.log('Created conversation:', newConv.id);
+        this._view?.webview.postMessage({
+          type: 'currentConversation',
+          id: newConv.id,
+          title: newConv.title
+        });
+      } else {
+        // Load the most recent conversation
+        const mostRecent = conversations[0];
+        this.currentConversationId = mostRecent.id;
+        console.log('Loading most recent conversation:', mostRecent.id);
+        const messages = await this.chatStorage.getMessages(mostRecent.id);
+        this._view?.webview.postMessage({
+          type: 'loadMessages',
+          conversationId: mostRecent.id,
+          messages,
+          title: mostRecent.title
+        });
+      }
+
+      await this.loadConversationList();
+    } catch (error) {
+      console.error('Error initializing chat:', error);
+    }
+  }
+
+  private async onSendMessage(message: string) {
+    if (!this._view || !this.currentConversationId) {
+      console.error('No conversation selected');
+      return;
+    }
+
+    console.log('Saving user message to DB for conversation:', this.currentConversationId);
+
+    try {
+      // Save user message to database
+      await this.chatStorage.addMessage(this.currentConversationId, 'user', message);
+
+      const cfg = await this.cfgManager.loadConfig();
+      const feature = cfg.features.chat;
+      const provider = feature.provider;
+      const model = feature.model;
+
+      // Get api key if needed
+      const apiKey = await this.cfgManager.getApiKey(provider);
+
+      if (!model) {
+        this._view?.webview.postMessage({
+          type: 'error',
+          message: 'No model configured. Please configure a model in settings.'
+        });
+        return;
+      }
+
+      // Get full conversation history
+      const messages = await this.chatStorage.getMessages(this.currentConversationId);
+      const history = messages
+        .filter((m) => m.id !== undefined)
+        .map((m) => ({ role: m.role, content: m.content }));
+
+      console.log('Sending message with history length:', history.length);
+
+      const payload: any = {
+        message,
+        model,
+        api_key: apiKey,
+        history
+      };
+
+      const client = new BackendClient(
+        vscode.workspace.getConfiguration('nextgenai').get('baseUrl') as string || this.backendUrl
+      );
+
+      // Start streaming - assistant bubble will be created
+      this._view.webview.postMessage({ type: 'assistantStart' });
+
+      let fullResponse = '';
+
+      await client.streamChat(
+        payload,
+        (chunk: string) => {
+          fullResponse += chunk;
+          // send chunk to webview to append to last assistant bubble
+          this._view?.webview.postMessage({ type: 'stream', chunk });
+        },
+        () => {
+          this._view?.webview.postMessage({ type: 'done' });
+        }
+      );
+
+      // Save assistant response to database
+      console.log('Saving assistant response to DB');
+      await this.chatStorage.addMessage(this.currentConversationId, 'assistant', fullResponse);
+
+      // Update conversation title if it's the first exchange
+      const allMessages = await this.chatStorage.getMessages(this.currentConversationId);
+      if (allMessages.length === 2) {
+        // First user message and first assistant response
+        const title = message.substring(0, 50) + (message.length > 50 ? '...' : '');
+        console.log('Updating conversation title to:', title);
+        await this.chatStorage.updateConversationTitle(this.currentConversationId, title);
+        await this.loadConversationList();
+      }
     } catch (error) {
       console.error('Chat error:', error);
       this._view?.webview.postMessage({ type: 'error', message: String(error) });
@@ -75,8 +190,77 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       vscode.window.showWarningMessage('No active editor to pin.');
       return;
     }
-    // Add a small message into chat to indicate pinned file
-    this._view?.webview.postMessage({ type: 'append', role: 'system', content: `📎 Pinned: ${editor.document.fileName}` });
+    this._view?.webview.postMessage({
+      type: 'append',
+      role: 'system',
+      content: `📎 Pinned: ${editor.document.fileName}`
+    });
+  }
+
+  private async onNewConversation() {
+    console.log('Creating new conversation');
+    try {
+      const conversation = await this.chatStorage.createConversation('New Conversation');
+      this.currentConversationId = conversation.id;
+      console.log('New conversation created:', conversation.id);
+      this._view?.webview.postMessage({ type: 'clearMessages' });
+      this._view?.webview.postMessage({
+        type: 'currentConversation',
+        id: conversation.id,
+        title: conversation.title
+      });
+      await this.loadConversationList();
+    } catch (error) {
+      console.error('Error creating conversation:', error);
+    }
+  }
+
+  private async onLoadConversation(conversationId: string) {
+    console.log('Loading conversation:', conversationId);
+    try {
+      this.currentConversationId = conversationId;
+      const messages = await this.chatStorage.getMessages(conversationId);
+      const conversations = await this.chatStorage.getAllConversations();
+      const current = conversations.find((c) => c.id === conversationId);
+
+      console.log('Loaded messages:', messages.length);
+
+      this._view?.webview.postMessage({
+        type: 'loadMessages',
+        conversationId,
+        messages,
+        title: current?.title
+      });
+    } catch (error) {
+      console.error('Error loading conversation:', error);
+    }
+  }
+
+  private async onDeleteConversation(conversationId: string) {
+    console.log('Deleting conversation:', conversationId);
+    try {
+      await this.chatStorage.deleteConversation(conversationId);
+      if (this.currentConversationId === conversationId) {
+        await this.onNewConversation();
+      }
+      await this.loadConversationList();
+    } catch (error) {
+      console.error('Error deleting conversation:', error);
+    }
+  }
+
+  private async loadConversationList() {
+    try {
+      const conversations = await this.chatStorage.getAllConversations();
+      console.log('Loaded conversation list:', conversations.length);
+      this._view?.webview.postMessage({
+        type: 'conversationList',
+        conversations,
+        currentId: this.currentConversationId
+      });
+    } catch (error) {
+      console.error('Error loading conversation list:', error);
+    }
   }
 
   private getHtmlForWebview(webview: vscode.Webview): string {
@@ -93,7 +277,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
 
       body {
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
         color: var(--vscode-foreground);
         background: var(--vscode-editor-background);
         display: flex;
@@ -102,7 +286,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         overflow: hidden;
       }
 
-      #header {
+      .header {
         display: flex;
         justify-content: space-between;
         align-items: center;
@@ -130,7 +314,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         justify-content: center;
         font-size: 10px;
         color: white;
-        font-weight: bold;
       }
 
       .header-actions {
@@ -243,7 +426,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         border: 1px solid var(--vscode-input-border);
         border-radius: 4px;
         font-size: 13px;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
         transition: border-color 0.2s;
       }
 
@@ -263,15 +445,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         font-weight: 500;
         cursor: pointer;
         transition: background 0.2s;
-        white-space: nowrap;
       }
 
       #send:hover {
         background: var(--vscode-button-hoverBackground);
-      }
-
-      #send:active {
-        opacity: 0.8;
       }
 
       #send:disabled {
@@ -279,87 +456,164 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         cursor: not-allowed;
       }
 
-      .empty-state {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
+      .sidebar-panel {
+        display: none;
+        position: absolute;
+        right: 0;
+        top: 0;
+        width: 300px;
         height: 100%;
-        color: var(--vscode-descriptionForeground);
-        text-align: center;
-        padding: 24px;
+        background: var(--vscode-sideBar-background);
+        border-left: 1px solid var(--vscode-input-border);
+        z-index: 1000;
+        flex-direction: column;
+        overflow: hidden;
       }
 
-      .empty-icon {
-        font-size: 48px;
-        margin-bottom: 12px;
-        opacity: 0.5;
+      .sidebar-panel.active {
+        display: flex;
       }
 
-      .empty-title {
-        font-size: 14px;
+      .sidebar-header {
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--vscode-input-border);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-shrink: 0;
+      }
+
+      .sidebar-title {
         font-weight: 600;
-        margin-bottom: 8px;
+        font-size: 13px;
+      }
+
+      .new-conv-btn {
+        background: transparent;
+        border: none;
         color: var(--vscode-foreground);
-      }
-
-      .empty-text {
-        font-size: 12px;
-        line-height: 1.5;
-        max-width: 200px;
-      }
-
-      code {
-        background: rgba(0, 0, 0, 0.2);
-        padding: 2px 6px;
+        cursor: pointer;
+        font-size: 16px;
+        padding: 4px;
         border-radius: 3px;
-        font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
-        font-size: 12px;
+        transition: background 0.2s;
       }
 
-      pre {
-        background: var(--vscode-input-background);
-        border: 1px solid var(--vscode-input-border);
+      .new-conv-btn:hover {
+        background: var(--vscode-button-hoverBackground);
+      }
+
+      #conversationsList {
+        flex: 1;
+        overflow-y: auto;
+        padding: 8px;
+      }
+
+      .conversation-item {
+        padding: 10px 12px;
+        margin-bottom: 4px;
+        background: transparent;
+        border: 1px solid transparent;
         border-radius: 4px;
-        padding: 12px;
-        overflow-x: auto;
-        margin: 8px 0;
+        cursor: pointer;
         font-size: 12px;
+        transition: all 0.2s;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        overflow: hidden;
+        user-select: none;
       }
 
-      pre code {
-        background: none;
-        padding: 0;
+      .conversation-item:hover {
+        background: var(--vscode-input-background);
+        border-color: var(--vscode-input-border);
+      }
+
+      .conversation-item.active {
+        background: var(--vscode-button-background);
+        color: var(--vscode-button-foreground);
+      }
+
+      .conversation-title {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .conversation-delete {
+        background: transparent;
+        border: none;
+        color: inherit;
+        cursor: pointer;
+        padding: 2px 4px;
+        font-size: 12px;
+        opacity: 0;
+        transition: opacity 0.2s;
+      }
+
+      .conversation-item:hover .conversation-delete {
+        opacity: 1;
+      }
+
+      .conversation-delete:hover {
+        color: #f48771;
+      }
+
+      #scrollButton {
+        position: fixed;
+        bottom: 100px;
+        right: 20px;
+        background: var(--vscode-button-background);
+        color: var(--vscode-button-foreground);
+        border: none;
+        border-radius: 50%;
+        width: 40px;
+        height: 40px;
+        font-size: 20px;
+        cursor: pointer;
+        display: none;
+        z-index: 100;
+      }
+
+      #scrollButton:hover {
+        background: var(--vscode-button-hoverBackground);
       }
 
       /* Scrollbar styling */
-      #messages::-webkit-scrollbar {
+      #messages::-webkit-scrollbar,
+      #conversationsList::-webkit-scrollbar {
         width: 8px;
       }
 
-      #messages::-webkit-scrollbar-track {
+      #messages::-webkit-scrollbar-track,
+      #conversationsList::-webkit-scrollbar-track {
         background: transparent;
       }
 
-      #messages::-webkit-scrollbar-thumb {
+      #messages::-webkit-scrollbar-thumb,
+      #conversationsList::-webkit-scrollbar-thumb {
         background: var(--vscode-scrollbarSlider-background);
         border-radius: 4px;
       }
 
-      #messages::-webkit-scrollbar-thumb:hover {
+      #messages::-webkit-scrollbar-thumb:hover,
+      #conversationsList::-webkit-scrollbar-thumb:hover {
         background: var(--vscode-scrollbarSlider-hoverBackground);
       }
     </style>
   </head>
   <body>
-    <div id="header">
+    <div class="header">
       <div class="header-title">
         <div class="header-icon">✨</div>
-        <span>NextGenAI</span>
+        <span id="headerTitle">NextGenAI</span>
       </div>
       <div class="header-actions">
-        <button id="pin" class="icon-btn" title="Pin current file to chat">📎</button>
-        <button id="settings" class="icon-btn" title="Open settings">⚙️</button>
+        <button id="historyBtn" class="icon-btn" title="Conversation history">📋</button>
+        <button id="pin" class="icon-btn" title="Pin current file">📎</button>
+        <button id="settings" class="icon-btn" title="Settings">⚙️</button>
       </div>
     </div>
 
@@ -370,6 +624,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <button id="send">↑</button>
     </div>
 
+    <div id="sidebarPanel" class="sidebar-panel">
+      <div class="sidebar-header">
+        <span class="sidebar-title">Conversations</span>
+        <button id="newConvBtn" class="new-conv-btn" title="New conversation">+</button>
+      </div>
+      <div id="conversationsList"></div>
+    </div>
+
     <script>
       const vscode = acquireVsCodeApi();
       const messagesDiv = document.getElementById('messages');
@@ -377,19 +639,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const sendBtn = document.getElementById('send');
       const pinBtn = document.getElementById('pin');
       const setBtn = document.getElementById('settings');
+      const newConvBtn = document.getElementById('newConvBtn');
+      const historyBtn = document.getElementById('historyBtn');
+      const sidebarPanel = document.getElementById('sidebarPanel');
+      const conversationsList = document.getElementById('conversationsList');
+      const headerTitle = document.getElementById('headerTitle');
 
       let hasMessages = false;
-
-      function showEmptyState() {
-        messagesDiv.innerHTML = \`
-          <div class="empty-state">
-            <div class="empty-icon">💬</div>
-            <div class="empty-title">Start a conversation</div>
-            <div class="empty-text">Ask me questions about your code</div>
-          </div>
-        \`;
-        hasMessages = false;
-      }
+      let currentConversationId = null;
 
       function escapeHtml(text) {
         const div = document.createElement('div');
@@ -427,18 +684,46 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         return false;
       }
 
+      function renderConversations(conversations, activeId) {
+        conversationsList.innerHTML = '';
+        conversations.forEach((conv) => {
+          const item = document.createElement('div');
+          item.className = 'conversation-item' + (conv.id === activeId ? ' active' : '');
+          item.innerHTML = \`
+            <span class="conversation-title">\${escapeHtml(conv.title)}</span>
+            <button class="conversation-delete" data-id="\${conv.id}">✕</button>
+          \`;
+
+          item.addEventListener('click', (e) => {
+            if (!e.target.classList.contains('conversation-delete')) {
+              console.log('Loading conversation:', conv.id);
+              vscode.postMessage({ type: 'loadConversation', conversationId: conv.id });
+              sidebarPanel.classList.remove('active');
+            }
+          });
+
+          item.querySelector('.conversation-delete').addEventListener('click', (e) => {
+            e.stopPropagation();
+            vscode.postMessage({ 
+              type: 'confirmDelete', 
+              conversationId: conv.id,
+              title: conv.title
+            });
+          });
+
+          conversationsList.appendChild(item);
+        });
+      }
+
       sendBtn.onclick = () => {
         const txt = input.value.trim();
-        if (!txt || sendBtn.disabled) return;
+        if (!txt || sendBtn.disabled || !currentConversationId) return;
 
-        // Add user message
+        console.log('Sending message, current conversation:', currentConversationId);
         appendMessage('user', txt);
-        
-        // Clear input and disable send button
         input.value = '';
         sendBtn.disabled = true;
 
-        // Send message to extension
         vscode.postMessage({ type: 'sendMessage', message: txt });
       };
 
@@ -449,6 +734,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
       };
 
+      historyBtn.onclick = () => {
+        sidebarPanel.classList.toggle('active');
+      };
+
       pinBtn.onclick = () => {
         vscode.postMessage({ type: 'pinFile' });
       };
@@ -457,33 +746,61 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         vscode.postMessage({ type: 'openSettings' });
       };
 
+      newConvBtn.onclick = () => {
+        console.log('New conversation button clicked');
+        vscode.postMessage({ type: 'newConversation' });
+        sidebarPanel.classList.remove('active');
+      };
+
       window.addEventListener('message', event => {
         const m = event.data;
-        console.log('Chat received message:', m.type);
-        
+        console.log('Chat webview received message:', m.type, m);
+
         if (m.type === 'assistantStart') {
-          // Create empty assistant bubble
           appendMessage('assistant', '');
         } else if (m.type === 'stream') {
-          // Append to last assistant message
           if (!appendToLastAssistant(m.chunk)) {
-            // If no assistant message exists, create one
             appendMessage('assistant', m.chunk);
           }
         } else if (m.type === 'done') {
-          // Enable send button
           sendBtn.disabled = false;
         } else if (m.type === 'append') {
-          // For system messages
           appendMessage(m.role, m.content);
         } else if (m.type === 'error') {
           appendMessage('assistant', '❌ Error: ' + m.message);
           sendBtn.disabled = false;
+        } else if (m.type === 'clearMessages') {
+          messagesDiv.innerHTML = '';
+          hasMessages = false;
+        } else if (m.type === 'conversationList') {
+          renderConversations(m.conversations, m.currentId);
+        } else if (m.type === 'loadMessages') {
+          console.log('Loading messages, count:', m.messages?.length);
+          currentConversationId = m.conversationId;
+          messagesDiv.innerHTML = '';
+          if (m.messages && m.messages.length > 0) {
+            hasMessages = true;
+            m.messages.forEach((msg) => {
+              appendMessage(msg.role, msg.content);
+            });
+          } else {
+            hasMessages = false;
+            messagesDiv.innerHTML = '';
+          }
+          headerTitle.textContent = m.title || 'NextGenAI';
+          sendBtn.disabled = false;
+        } else if (m.type === 'currentConversation') {
+          console.log('Current conversation set:', m.id);
+          currentConversationId = m.id;
+          headerTitle.textContent = m.title || 'NextGenAI';
+          messagesDiv.innerHTML = '';
+          hasMessages = false;
+          sendBtn.disabled = false;
         }
       });
 
-      // Show empty state initially
-      showEmptyState();
+      console.log('Chat webview initializing');
+      vscode.postMessage({ type: 'viewReady' });
     </script>
   </body>
 </html>`;

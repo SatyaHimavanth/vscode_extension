@@ -6,3 +6,4 @@ nextgenai-coding-assistant/*.vsix
 backend/__pycache__/
 backend/.venv/
 backend/.env
+.gitignore

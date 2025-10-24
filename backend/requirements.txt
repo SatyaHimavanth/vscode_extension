@@ -4,3 +4,4 @@ httpx
 langchain-google-genai
 google-genai
 anyio
+langchain

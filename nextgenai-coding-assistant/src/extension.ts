@@ -4,15 +4,26 @@ import { ConfigManager } from './configManager';
 import { ChatViewProvider } from './chatView';
 import { SettingsPanel } from './settingsPanel';
 import { InlineCompletionProvider } from './inlineProvider';
+import { ChatStorage } from './chatStorage';
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
   console.log('NextGenAI extension activated');
 
   const cfgManager = new ConfigManager(context);
   const baseUrl = vscode.workspace.getConfiguration('nextgenai').get('baseUrl') as string || 'http://localhost:8000';
 
-  // Register Chat View
-  const chatProvider = new ChatViewProvider(context.extensionUri, cfgManager, baseUrl);
+  // Initialize chat storage (SQLite database)
+  const chatStorage = new ChatStorage(context);
+  try {
+    await chatStorage.initialize();
+    console.log('Chat database initialized');
+  } catch (error) {
+    console.error('Failed to initialize chat database:', error);
+    vscode.window.showErrorMessage('Failed to initialize chat database');
+  }
+
+  // Register Chat View with database support
+  const chatProvider = new ChatViewProvider(context.extensionUri, cfgManager, baseUrl, chatStorage);
   context.subscriptions.push(vscode.window.registerWebviewViewProvider('nextgenai.chatView', chatProvider));
 
   // Register settings command
@@ -22,8 +33,6 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Register pin file command
   context.subscriptions.push(vscode.commands.registerCommand('nextgenai.pinFile', async () => {
-    // forward to chat view if active
-    const view = vscode.window.createTreeView; // noop - we encourage using the pin button in UI
     vscode.window.showInformationMessage('Use the chat view pin button to pin files.');
   }));
 
@@ -37,6 +46,13 @@ export function activate(context: vscode.ExtensionContext) {
     await vscode.workspace.getConfiguration('nextgenai').update('enableInline', !current, vscode.ConfigurationTarget.Global);
     vscode.window.showInformationMessage(`NextGenAI inline suggestions ${!current ? 'enabled' : 'disabled'}.`);
   }));
+
+  // Cleanup on deactivation
+  context.subscriptions.push({
+    dispose: async () => {
+      await chatStorage.close();
+    }
+  });
 }
 
 export function deactivate() {
