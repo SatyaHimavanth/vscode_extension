@@ -1,0 +1,8 @@
+nextgenai-coding-assistant/out
+nextgenai-coding-assistant/dist
+nextgenai-coding-assistant/node_modules
+nextgenai-coding-assistant/.vscode-test/
+nextgenai-coding-assistant/*.vsix
+backend/__pycache__/
+backend/.venv/
+backend/.env

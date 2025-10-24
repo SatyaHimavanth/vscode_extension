@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+httpx
+langchain-google-genai
+google-genai
+anyio
