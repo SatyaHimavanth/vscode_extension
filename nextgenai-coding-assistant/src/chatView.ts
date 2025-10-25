@@ -11,11 +11,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private backendUrl: string;
   private chatStorage: ChatStorage;
   private currentConversationId: string | null = null;
+  private indexer: any;
+  private indexStorage: any;
+  private currentIndex: any = null;
 
-  constructor(private readonly extensionUri: vscode.Uri, cfgManager: ConfigManager, backendUrl: string, chatStorage: ChatStorage) {
+  constructor(
+    private readonly extensionUri: vscode.Uri,
+    cfgManager: ConfigManager,
+    backendUrl: string,
+    chatStorage: ChatStorage,
+    indexer?: any,
+    indexStorage?: any
+  ) {
     this.cfgManager = cfgManager;
     this.backendUrl = backendUrl;
     this.chatStorage = chatStorage;
+    this.indexer = indexer;
+    this.indexStorage = indexStorage;
   }
 
   resolveWebviewView(webviewView: vscode.WebviewView) {
@@ -62,7 +74,37 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case 'viewReady':
           await this.initializeChat();
           break;
+        case 'indexWorkspace':
+          await this.onIndexWorkspace();
+          break;
       }
+    });
+  }
+
+  notifyIndexComplete(index: any) {
+    this.currentIndex = index;
+    this._view?.webview.postMessage({
+      type: 'indexComplete',
+      index: {
+        fileCount: index.fileCount,
+        totalSize: index.totalSize,
+        languages: index.languages
+      },
+      manual: true  // Indicates manual indexing
+    });
+  }
+
+  notifyIndexUpdate(index: any) {
+    this.currentIndex = index;
+    this._view?.webview.postMessage({
+      type: 'indexUpdate',
+      index: {
+        fileCount: index.fileCount,
+        totalSize: index.totalSize,
+        languages: index.languages,
+        updated: new Date().toLocaleTimeString()
+      },
+      automatic: true  // Indicates auto-indexing
     });
   }
 
@@ -190,6 +232,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       vscode.window.showWarningMessage('No active editor to pin.');
       return;
     }
+    // Add a small message into chat to indicate pinned file
     this._view?.webview.postMessage({
       type: 'append',
       role: 'system',
@@ -263,6 +306,60 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async onIndexWorkspace() {
+    if (!this.indexer || !this.indexStorage) {
+      this._view?.webview.postMessage({
+        type: 'indexError',
+        message: 'Indexer not initialized'
+      });
+      return;
+    }
+
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+      this._view?.webview.postMessage({
+        type: 'indexError',
+        message: 'No workspace folder open'
+      });
+      return;
+    }
+
+    this._view?.webview.postMessage({ type: 'indexStart' });
+
+    try {
+      const index = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: 'Indexing Codebase',
+          cancellable: false
+        },
+        async (progress) => {
+          return await this.indexer.indexWorkspace(workspaceFolder.uri.fsPath, progress);
+        }
+      );
+
+      await this.indexStorage.saveIndex(workspaceFolder.uri.fsPath, index);
+      this.currentIndex = index;
+
+      this._view?.webview.postMessage({
+        type: 'indexComplete',
+        index: {
+          fileCount: index.fileCount,
+          totalSize: index.totalSize,
+          languages: index.languages
+        }
+      });
+
+      console.log('Workspace indexed successfully');
+    } catch (error) {
+      console.error('Indexing error:', error);
+      this._view?.webview.postMessage({
+        type: 'indexError',
+        message: String(error)
+      });
+    }
+  }
+
   private getHtmlForWebview(webview: vscode.Webview): string {
     return `<!doctype html>
 <html>
@@ -304,6 +401,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         font-weight: 600;
       }
 
+      .index-control-bar {
+        padding: 8px 16px;
+        border-bottom: 1px solid var(--vscode-input-border);
+        background: var(--vscode-sideBar-background);
+        flex-shrink: 0;
+      }
+
       .header-icon {
         width: 16px;
         height: 16px;
@@ -335,8 +439,107 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         transition: background 0.2s;
       }
 
-      .icon-btn:hover {
+      .icon-btn:hover:not(:disabled) {
         background: var(--vscode-button-hoverBackground);
+      }
+
+      .icon-btn:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
+      .index-control {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 10px;
+        border: 1.5px solid var(--vscode-input-border);
+        border-radius: 6px;
+        background: var(--vscode-input-background);
+        width: 100%;
+      }
+
+      .index-label {
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: var(--vscode-descriptionForeground);
+        user-select: none;
+        white-space: nowrap;
+      }
+
+      .toggle-switch-group {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex: 1;
+      }
+
+      .toggle-checkbox {
+        display: none;
+      }
+
+      .toggle-switch {
+        position: relative;
+        display: inline-block;
+        width: 38px;
+        height: 20px;
+        background: var(--vscode-input-background);
+        border: 1px solid var(--vscode-input-border);
+        border-radius: 10px;
+        cursor: pointer;
+        transition: all 0.3s;
+      }
+
+      .toggle-slider {
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 16px;
+        height: 16px;
+        background: var(--vscode-button-background);
+        border-radius: 50%;
+        transition: left 0.3s;
+      }
+
+      .toggle-checkbox:checked + .toggle-switch {
+        background: rgba(76, 175, 80, 0.2);
+        border-color: #4caf50;
+      }
+
+      .toggle-checkbox:checked + .toggle-switch .toggle-slider {
+        left: 20px;
+        background: #4caf50;
+      }
+
+      .toggle-switch:hover {
+        border-color: var(--vscode-button-background);
+      }
+
+      .index-button {
+        padding: 4px 12px;
+        background: var(--vscode-button-background);
+        color: var(--vscode-button-foreground);
+        border: none;
+        border-radius: 4px;
+        font-size: 13px;
+        cursor: pointer;
+        transition: all 0.2s;
+        white-space: nowrap;
+      }
+
+      .index-button:hover:not(:disabled) {
+        background: var(--vscode-button-hoverBackground);
+      }
+
+      .index-button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .index-button.loading {
+        opacity: 0.7;
       }
 
       #messages {
@@ -561,26 +764,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         color: #f48771;
       }
 
-      #scrollButton {
-        position: fixed;
-        bottom: 100px;
-        right: 20px;
-        background: var(--vscode-button-background);
-        color: var(--vscode-button-foreground);
-        border: none;
-        border-radius: 50%;
-        width: 40px;
-        height: 40px;
-        font-size: 20px;
-        cursor: pointer;
-        display: none;
-        z-index: 100;
-      }
-
-      #scrollButton:hover {
-        background: var(--vscode-button-hoverBackground);
-      }
-
       /* Scrollbar styling */
       #messages::-webkit-scrollbar,
       #conversationsList::-webkit-scrollbar {
@@ -616,6 +799,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         <button id="settings" class="icon-btn" title="Settings">⚙️</button>
       </div>
     </div>
+    <div class="index-control">
+      <span class="index-label">Index</span>
+      <div class="toggle-switch-group">
+        <input type="checkbox" id="indexToggle" class="toggle-checkbox">
+        <label for="indexToggle" class="toggle-switch" title="Toggle: ON = Auto index, OFF = Click button to index">
+          <span class="toggle-slider"></span>
+        </label>
+        <button id="indexButton" class="index-button" title="Click to index now (only in OFF mode)">📚</button>
+      </div>
+    </div>
 
     <div id="messages"></div>
 
@@ -644,9 +837,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const sidebarPanel = document.getElementById('sidebarPanel');
       const conversationsList = document.getElementById('conversationsList');
       const headerTitle = document.getElementById('headerTitle');
+      const indexToggle = document.getElementById('indexToggle');
+      const indexButton = document.getElementById('indexButton');
 
       let hasMessages = false;
       let currentConversationId = null;
+      let isIndexing = false;
+      let autoIndexEnabled = false;
 
       function escapeHtml(text) {
         const div = document.createElement('div');
@@ -752,6 +949,49 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         sidebarPanel.classList.remove('active');
       };
 
+      // Index toggle handler
+      indexToggle.addEventListener('change', (e) => {
+        autoIndexEnabled = e.target.checked;
+        console.log('Auto-index toggled:', autoIndexEnabled ? 'ON' : 'OFF');
+
+        if (autoIndexEnabled) {
+          // Enable auto-indexing
+          indexButton.disabled = true;
+          indexButton.style.opacity = '0.5';
+          indexButton.style.cursor = 'not-allowed';
+          appendMessage('system', '🔄 Auto-index enabled - Watching for changes (5s debounce)');
+          vscode.postMessage({ type: 'enableAutoIndex' });
+        } else {
+          // Disable auto-indexing
+          indexButton.disabled = false;
+          indexButton.style.opacity = '1';
+          indexButton.style.cursor = 'pointer';
+          appendMessage('system', '📚 Auto-index disabled - Click button to index');
+          vscode.postMessage({ type: 'disableAutoIndex' });
+        }
+      });
+
+      // Index button handler
+      indexButton.onclick = () => {
+        if (autoIndexEnabled) {
+          console.log('Index button disabled in auto mode');
+          return;
+        }
+
+        if (isIndexing) {
+          console.log('Indexing already in progress');
+          return;
+        }
+
+        console.log('Manual index button clicked');
+        isIndexing = true;
+        indexButton.classList.add('loading');
+        indexButton.textContent = '⏳';
+        indexButton.disabled = true;
+
+        vscode.postMessage({ type: 'indexWorkspace' });
+      };
+
       window.addEventListener('message', event => {
         const m = event.data;
         console.log('Chat webview received message:', m.type, m);
@@ -796,9 +1036,38 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           messagesDiv.innerHTML = '';
           hasMessages = false;
           sendBtn.disabled = false;
+        } else if (m.type === 'indexStart') {
+          console.log('Indexing started');
+          appendMessage('system', '🔍 Indexing workspace...');
+        } else if (m.type === 'indexComplete') {
+          console.log('Indexing completed');
+          isIndexing = false;
+          indexManualBtn.disabled = false;
+          indexManualBtn.textContent = '📚';
+          const { fileCount, totalSize, languages } = m.index;
+          const langStr = Object.entries(languages)
+            .slice(0, 3)
+            .map(([lang, count]) => \`\${lang}: \${count}\`)
+            .join(', ');
+          appendMessage('system', \`✓ Index complete!\\n📦 Files: \${fileCount}\\n📊 Languages: \${langStr}\`);
+        } else if (m.type === 'indexError') {
+          console.log('Indexing error:', m.message);
+          isIndexing = false;
+          indexManualBtn.disabled = false;
+          indexManualBtn.textContent = '📚';
+          appendMessage('assistant', '❌ Error: ' + m.message);
+        } else if (m.type === 'indexUpdate') {
+          console.log('Auto-index updated');
+          const { fileCount, totalSize, languages, updated } = m.index;
+          const langStr = Object.entries(languages)
+            .slice(0, 3)
+            .map(([lang, count]) => \`\${lang}: \${count}\`)
+            .join(', ');
+          appendMessage('system', \`🔄 Auto-update at \${updated}\\n📦 Files: \${fileCount}\\n📊 Languages: \${langStr}\`);
         }
       });
 
+      // Initial setup
       console.log('Chat webview initializing');
       vscode.postMessage({ type: 'viewReady' });
     </script>

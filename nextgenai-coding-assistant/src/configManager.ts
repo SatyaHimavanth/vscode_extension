@@ -26,7 +26,7 @@ const DEFAULT_CONFIG: NextGenConfig = {
   },
   features: {
     chat: { provider: "google", model: undefined },
-    inline: { provider: "litellm", model: undefined },
+    inline: { provider: "google", model: undefined },
     explain: { provider: "google", model: undefined }
   }
 };

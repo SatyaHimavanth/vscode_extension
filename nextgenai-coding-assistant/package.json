@@ -41,6 +41,22 @@
       {
         "command": "nextgenai.toggleInline",
         "title": "NextGenAI: Toggle Inline Suggestions"
+      },
+      {
+        "command": "nextgenai.indexWorkspace",
+        "title": "NextGenAI: Index Workspace (Manual)"
+      },
+      {
+        "command": "nextgenai.clearIndex",
+        "title": "NextGenAI: Clear Index"
+      },
+      {
+        "command": "nextgenai.indexStatus",
+        "title": "NextGenAI: Show Index Status"
+      },
+      {
+        "command": "nextgenai.toggleAutoIndex",
+        "title": "NextGenAI: Toggle Auto-Indexing"
       }
     ],
     "configuration": {
@@ -49,12 +65,12 @@
         "nextgenai.baseUrl": {
           "type": "string",
           "default": "http://localhost:8000",
-          "description": "Backend API URL for NextGenAI server"
+          "description": "Backend API URL for NextGenAI server (e.g., http://localhost:8000 or http://192.168.1.100:8000)"
         },
         "nextgenai.enableInline": {
           "type": "boolean",
           "default": true,
-          "description": "Enable automatic inline suggestions"
+          "description": "Enable automatic inline code suggestions while typing"
         }
       }
     }

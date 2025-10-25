@@ -232,13 +232,7 @@ async def chat_stream(
                 yield chunk.content
         except Exception as e:
             print(f"Error in chat_stream: {e}",type(e))
-            try:
-                error_message = json.loads(str(e))['message']
-                print("Error message:", error_message)
-                yield error_message
-            except (json.JSONDecodeError, KeyError):
-                print("Error in chat_stream: ", e)
-                yield e
+            yield str(e)
 
     return StreamingResponse(generator(), media_type="text/plain; charset=utf-8")
 

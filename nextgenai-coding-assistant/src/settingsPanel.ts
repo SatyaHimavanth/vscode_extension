@@ -24,6 +24,25 @@ export class SettingsPanel {
     this._panel.webview.onDidReceiveMessage(async (message) => {
       console.log('Settings panel received message:', message.type, message);
       switch (message.type) {
+        case 'loadBackendUrl':
+          {
+            const baseUrl = vscode.workspace.getConfiguration('nextgenai').get('baseUrl') as string;
+            this._panel.webview.postMessage({ type: 'backendUrlLoaded', baseUrl });
+          }
+          break;
+        case 'saveBackendUrl':
+          {
+            const { baseUrl } = message;
+            try {
+              await vscode.workspace.getConfiguration('nextgenai').update('baseUrl', baseUrl, vscode.ConfigurationTarget.Global);
+              console.log('Backend URL saved:', baseUrl);
+              this._panel.webview.postMessage({ type: 'saved' });
+            } catch (error) {
+              console.error('Error saving backend URL:', error);
+              this._panel.webview.postMessage({ type: 'error', message: 'Failed to save backend URL' });
+            }
+          }
+          break;
         case 'load':
           {
             const cfg = await this.configManager.loadConfig();
@@ -414,6 +433,21 @@ export class SettingsPanel {
           <h1>NextGenAI Settings</h1>
           <p class="subtitle">Configure AI providers, API keys, and feature models</p>
 
+          <div id="backendConfig" style="margin-bottom: 32px;">
+            <div style="display: flex; align-items: center; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--vscode-input-border);">
+              <span class="section-icon"></span>
+              <div class="section-title">Backend Configuration</div>
+            </div>
+            <div class="form-group">
+              <label>Backend Server URL</label>
+              <input type="text" id="backendUrl" placeholder="http://localhost:8000" />
+              <small style="color: var(--vscode-descriptionForeground); margin-top: 6px; display: block; font-size: 11px;">
+                Set the URL of your NextGenAI backend server. Examples: http://localhost:8000, http://192.168.1.100:8000
+              </small>
+            </div>
+            <button id="saveBackendUrl" style="margin-top: 8px;">💾 Save Backend URL</button>
+          </div>
+
           <div id="container">
             <div class="loading">
               <span class="spinner"></span> Loading configuration...
@@ -428,11 +462,21 @@ export class SettingsPanel {
             return s ? s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '';
           }
 
+          // Load backend URL on startup
+          function loadBackendUrl() {
+            vscode.postMessage({ type: 'loadBackendUrl' });
+          }
+
           window.addEventListener('message', event => {
             const msg = event.data;
             console.log('Settings webview received:', msg.type);
             if (msg.type === 'loaded') {
               render(msg.config, msg.hasKeys);
+            } else if (msg.type === 'backendUrlLoaded') {
+              const backendUrlInput = document.getElementById('backendUrl');
+              if (backendUrlInput) {
+                backendUrlInput.value = msg.baseUrl || 'http://localhost:8000';
+              }
             } else if (msg.type === 'fetchedModels') {
               alert('✓ Models fetched and saved for ' + msg.provider);
               vscode.postMessage({ type: 'load' });
@@ -647,7 +691,54 @@ export class SettingsPanel {
 
           // initial load
           console.log('Requesting initial load');
+          loadBackendUrl();
           vscode.postMessage({ type: 'load' });
+
+          // Handle backend URL save
+          document.addEventListener('DOMContentLoaded', () => {
+            const saveBtn = document.getElementById('saveBackendUrl');
+            if (saveBtn) {
+              saveBtn.onclick = () => {
+                const urlInput = document.getElementById('backendUrl');
+                if (urlInput) {
+                  const url = urlInput.value.trim();
+                  if (!url) {
+                    alert('Backend URL cannot be empty');
+                    return;
+                  }
+                  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+                    alert('Backend URL must start with http:// or https://');
+                    return;
+                  }
+                  console.log('Saving backend URL:', url);
+                  vscode.postMessage({ type: 'saveBackendUrl', baseUrl: url });
+                }
+              };
+            }
+          });
+
+          // Try to attach handler immediately (in case DOM is ready)
+          setTimeout(() => {
+            const saveBtn = document.getElementById('saveBackendUrl');
+            if (saveBtn) {
+              saveBtn.onclick = () => {
+                const urlInput = document.getElementById('backendUrl');
+                if (urlInput) {
+                  const url = urlInput.value.trim();
+                  if (!url) {
+                    alert('Backend URL cannot be empty');
+                    return;
+                  }
+                  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+                    alert('Backend URL must start with http:// or https://');
+                    return;
+                  }
+                  console.log('Saving backend URL:', url);
+                  vscode.postMessage({ type: 'saveBackendUrl', baseUrl: url });
+                }
+              };
+            }
+          }, 100);
         </script>
       </body>
       </html>
